@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Social Survival</title>
+  <style>
+    body { font-family: sans-serif; padding: 1rem; }
+    #game, #lobby { max-width: 600px; margin: auto; }
+    .hidden { display: none; }
+    button { margin: 0.25rem; }
+    #log { border: 1px solid #ccc; height: 200px; overflow-y: auto; padding: 0.5rem; }
+  </style>
+</head>
+<body>
+
+  <!-- LOBBY -->
+  <div id="lobby">
+    <h1>Social Survival Lobby</h1>
+    <label>Game ID: <input id="gameIdInput" placeholder="Enter or create a game"/></label>
+    <button id="createBtn">Create Game</button>
+    <button id="joinBtn">Join Game</button>
+    <hr/>
+    <h3>Pick Your Structure</h3>
+    <select id="structureSelect">
+      <option value="solitary">Solitary (1)</option>
+      <option value="quasi">Quasisocial (2)</option>
+      <option value="communal">Communal (3)</option>
+      <option value="semi">Semisocial (4)</option>
+      <option value="eu">Eusocial (5)</option>
+    </select>
+  </div>
+
+  <!-- GAME UI -->
+  <div id="game" class="hidden">
+    <h2>Game: <span id="gameIdDisplay"></span></h2>
+    <p>Round <span id="roundNum">-</span> / 7 &nbsp;|&nbsp; Phase: <span id="phaseName">-</span> &nbsp;|&nbsp; Turn: <span id="turnName">-</span></p>
+    <div>
+      <h4>Your Stats (<span id="yourStruct">-</span>)</h4>
+      Food: <span id="food">0</span><br/>
+      Nest Level: <span id="nest">0</span><br/>
+      Grubs: <span id="grubs">0</span><br/>
+    </div>
+    <hr/>
+
+    <!-- Action Buttons -->
+    <div id="actions">
+      <button id="forageBtn">Forage</button>
+      <button id="offspringBtn">Bear Offspring</button>
+      <button id="nestBtn">Upgrade Nest</button>
+      <button id="attackBtn">Attack</button>
+      <button id="moveBtn">Move</button>
+      <button id="endPhaseBtn">End Phase</button>
+    </div>
+
+    <hr/>
+    <div id="log"></div>
+  </div>
+
+  <!-- Firebase -->
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database.js"></script>
+  <script>
+  // 1) FIREBASE CONFIG → replace with YOURS
+  const firebaseConfig = {
+    apiKey: "YOUR_KEY",
+    authDomain: "YOUR_APP.firebaseapp.com",
+    projectId: "YOUR_APP",
+    databaseURL: "https://YOUR_APP.firebaseio.com",
+    storageBucket: "YOUR_APP.appspot.com",
+    messagingSenderId: "SENDER_ID",
+    appId: "APP_ID"
+  };
+  // init
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.database();
+
+  // 2) GLOBALS
+  let gameId, playerId = Date.now().toString(), structure;
+  const order = ['eu', 'semi', 'quasi', 'communal', 'solitary'];
+  const statsTemplate = {
+    solitary:  { sus:4, forage:1, costOff:2, costNest:1, atkBonus:3, players:1 },
+    quasi:     { sus:3, forage:2, costOff:2, costNest:2, atkBonus:2, players:2 },
+    communal:  { sus:2, forage:3, costOff:2, costNest:3, atkBonus:1, players:3 },
+    semi:      { sus:1, forage:4, costOff:2, costNest:7, atkBonus:4, players:4 },
+    eu:        { sus:1, forage:5, costOff:20,costNest:5,atkBonus:5, players:5 }
+  };
+
+  // 3) DOM
+  const lobbyDiv = document.getElementById('lobby'),
+        gameDiv  = document.getElementById('game'),
+        logDiv   = document.getElementById('log'),
+        roundNum = document.getElementById('roundNum'),
+        phaseName= document.getElementById('phaseName'),
+        turnName = document.getElementById('turnName'),
+        foodSpan = document.getElementById('food'),
+        nestSpan = document.getElementById('nest'),
+        grubSpan = document.getElementById('grubs'),
+        structSpan = document.getElementById('yourStruct'),
+        gameIdDisp = document.getElementById('gameIdDisplay');
+
+  // Buttons
+  document.getElementById('createBtn').onclick = () => initGame(true);
+  document.getElementById('joinBtn').onclick   = () => initGame(false);
+  document.getElementById('forageBtn').onclick  = () => takeAction('forage');
+  document.getElementById('offspringBtn').onclick = () => takeAction('offspring');
+  document.getElementById('nestBtn').onclick    = () => takeAction('nest');
+  document.getElementById('attackBtn').onclick  = () => takeAction('attack');
+  document.getElementById('moveBtn').onclick    = () => takeAction('move');
+  document.getElementById('endPhaseBtn').onclick= () => takeAction('endPhase');
+
+  // 4) INITIALIZE OR JOIN
+  async function initGame(isCreator) {
+    const inputId = document.getElementById('gameIdInput').value.trim();
+    structure = document.getElementById('structureSelect').value;
+    if (!structure) return alert('Pick a structure.');
+
+    if (isCreator) {
+      gameId = Math.random().toString(36).substr(2,6);
+      const initState = {
+        round: 1,
+        phase: 'Foraging',
+        turnIndex: 0,
+        structures: {},
+        log: []
+      };
+      // seed each structure
+      order.forEach(s => {
+        initState.structures[s] = {
+          players: [],           // we’ll push playerId
+          food: 0, nest:0, grubs:0,
+          pos: 0                // all start at space 0
+        };
+      });
+      await db.ref(`games/${gameId}`).set(initState);
+    }
+    else {
+      gameId = inputId;
+    }
+
+    // join as a player
+    const path = `games/${gameId}/structures/${structure}/players`;
+    await db.ref(path).transaction(arr => {
+      if (!arr) arr = [];
+      if (arr.length >= statsTemplate[structure].players)
+        return arr; // full
+      arr.push(playerId);
+      return arr;
+    });
+
+    // UI switch
+    lobbyDiv.classList.add('hidden');
+    gameDiv.classList.remove('hidden');
+    structSpan.textContent = structure;
+    gameIdDisp.textContent = gameId;
+
+    // start listening
+    db.ref(`games/${gameId}`).on('value', snap => {
+      const state = snap.val();
+      if (!state) return;
+      updateUI(state);
+    });
+  }
+
+  // 5) UPDATE UI
+  function updateUI(state) {
+    roundNum.textContent = state.round;
+    phaseName.textContent = state.phase;
+    turnName.textContent = order[state.turnIndex];
+    appendLog(state.log);
+
+    const my = state.structures[structure];
+    foodSpan.textContent = my.food;
+    nestSpan.textContent = my.nest;
+    grubSpan.textContent = my.grubs;
+
+    // only enable actions if it's your turn & correct phase
+    const isMyTurn = (order[state.turnIndex] === structure);
+    ['forage','offspring','nest','attack','move','endPhase']
+      .forEach(actName => {
+        document.getElementById(actName + 'Btn')
+          .disabled = !isMyTurn;
+      });
+  }
+
+  // 6) LOGGING
+  let lastLogLength = 0;
+  function appendLog(logArr) {
+    if (logArr.length === lastLogLength) return;
+    for (let i = lastLogLength; i < logArr.length; i++) {
+      const p = document.createElement('p');
+      p.textContent = logArr[i];
+      logDiv.appendChild(p);
+    }
+    lastLogLength = logArr.length;
+    logDiv.scrollTop = logDiv.scrollHeight;
+  }
+
+  // 7) TAKE ACTION
+  async function takeAction(action) {
+    const baseRef = db.ref(`games/${gameId}`);
+    const snap = await baseRef.get();
+    const state = snap.val();
+    const currStruct = state.structures[structure];
+    const stats = statsTemplate[structure];
+
+    // helper: pushLog
+    const pushLog = txt => baseRef.child('log').push(txt);
+
+    switch (state.phase) {
+
+      case 'Foraging':
+        if (action !== 'forage') return alert('You must forage first');
+        // roll D6 per player
+        let rolls=0;
+        currStruct.players.forEach(_=> rolls += (Math.floor(Math.random()*6)+1));
+        currStruct.food += rolls;
+        pushLog(`${structure} foraged ${rolls} food.`);
+        // move to Actions
+        state.phase = 'Actions';
+        break;
+
+      case 'Actions':
+        if (action === 'offspring') {
+          if (currStruct.food < stats.costOff) return alert('Not enough food');
+          currStruct.food -= stats.costOff;
+          currStruct.grubs += 1;
+          pushLog(`${structure} bore 1 grub.`);
+        }
+        else if (action === 'nest') {
+          if (currStruct.food < stats.costNest) return alert('Not enough food');
+          currStruct.food -= stats.costNest;
+          currStruct.nest += 1;
+          pushLog(`${structure} upgraded nest to lvl ${currStruct.nest}.`);
+        }
+        else if (action === 'attack') {
+          // for brevity: only allow attacking the next structure in turn order
+          const targetIdx = (state.turnIndex+1)%order.length;
+          const targetStr = order[targetIdx];
+          const target = state.structures[targetStr];
+          // simple adjacency: pos difference <=1
+          if (Math.abs(currStruct.pos - target.pos)>1)
+            return alert('Target not adjacent');
+          // pay costNest (using nest cost as attack cost)
+          if (currStruct.food < stats.costNest) return alert('Not enough food');
+          currStruct.food -= stats.costNest;
+          // roll
+          const atkRoll = Math.floor(Math.random()*6)+1 + stats.atkBonus;
+          const defRoll = Math.floor(Math.random()*6)+1 + target.nest;
+          pushLog(`${structure} attacks ${targetStr}: ${atkRoll} vs ${defRoll}`);
+          if (atkRoll > defRoll) {
+            const loot = Math.floor(Math.random()*(6))+ stats.costNest;
+            target.food = Math.max(0,target.food - loot);
+            currStruct.food += loot;
+            pushLog(`Success! ${structure} stole ${loot} food.`);
+          } else {
+            target.nest = Math.max(0, target.nest-1);
+            pushLog(`Failed; ${targetStr} nest reduced to ${target.nest}.`);
+          }
+        }
+        else if (action === 'move') {
+          // pay 1 food per player
+          const cost = currStruct.players.length;
+          if (currStruct.food < cost) return alert('Not enough food');
+          currStruct.food -= cost;
+          currStruct.pos += 1; // always move +1 for simplicity
+          pushLog(`${structure} moved to space ${currStruct.pos}.`);
+        }
+        else if (action === 'endPhase') {
+          // move to Events
+          state.phase = 'Events';
+        }
+        break;
+
+      case 'Events':
+        if (action !== 'endPhase') return alert('Click "End Phase" to roll event');
+        const events = ['Nothing','Disease','Predation','Natural Disaster'];
+        const ev = events[Math.floor(Math.random()*events.length)];
+        pushLog(`${structure} hits event: ${ev}`);
+        if (ev === 'Disease') {
+          const roll = Math.floor(Math.random()*6)+1;
+          if (roll > stats.sus) {
+            const diff = roll - stats.sus;
+            currStruct.food -= diff;
+            pushLog(`Disease! -${diff} food.`);
+          }
+        }
+        else if (ev === 'Predation') {
+          const dieMax = (['semi','communal','eu'].includes(structure)) ? 6 : 4;
+          const roll = Math.floor(Math.random()*dieMax)+1;
+          currStruct.nest -= roll;
+          pushLog(`Predation! -${roll} nest.`);
+          if (currStruct.nest < 0) {
+            currStruct.food += currStruct.nest; // subtract negative
+            currStruct.nest = 0;
+            pushLog(`Nest broke → ${currStruct.food<0? 'Food deficit!' : ''}`);
+          }
+        }
+        else if (ev === 'Natural Disaster') {
+          const roll = Math.floor(Math.random()*6)+1;
+          currStruct.food -= roll;
+          pushLog(`Disaster! -${roll} food.`);
+        }
+        // advance turn or round
+        // next structure
+        state.turnIndex = (state.turnIndex+1)%order.length;
+        if (state.turnIndex === 0) {
+          // End of round: feed
+          order.forEach(s => {
+            const st = state.structures[s];
+            st.food -= st.players.length;
+            if (st.food < 0) st.grubs += st.food; // subtract into grubs
+            if (st.grubs < 0) st.grubs = 0;         // no negative grubs
+          });
+          state.round++;
+          if (state.round > 7) {
+            // determine winner
+            let winner='', max= -1;
+            order.forEach(s => {
+              if (state.structures[s].grubs > max) {
+                max = state.structures[s].grubs;
+                winner = s;
+              }
+            });
+            pushLog(`🏆 ${winner} wins with ${max} grubs!`);
+            state.phase = 'GameOver';
+          }
+        }
+        // reset to Foraging on first turn of next
+        state.phase = 'Foraging';
+        break;
+
+      default:
+        alert('Game Over or invalid phase');
+        return;
+    }
+
+    // commit state
+    await baseRef.set(state);
+  }
+  </script>
+</body>
+</html>
+
